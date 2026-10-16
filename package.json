@@ -1,5 +1,6 @@
 {
   "name": "opendesign",
+  "license": "Apache-2.0",
   "private": true,
   "packageManager": "pnpm@10.10.0",
   "scripts": {

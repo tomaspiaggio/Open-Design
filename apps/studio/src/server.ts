@@ -11,7 +11,7 @@ import { initTRPC } from '@trpc/server'
 import { z } from 'zod'
 import { config } from 'dotenv'
 import { createDesignSystem as createLegacyDesignSystem, exportDesignSystem, saveDesignSystem as saveLegacyDesignSystem, type DesignTokens } from './project.js'
-import { activateProject, addMessage, clearProjectMessages, createProject, createSystem, getProject, getProjectMessages, getSystem, getSystems, initializeDatabase, listProjectFiles, listProjects, prisma, readProjectFile, saveSystem, setProjectSystem, storeThumbnail, writeProjectFile } from './db.js'
+import { activateProject, addMessage, clearProjectMessages, createProject, createSystem, getProject, getProjectMessages, getSystem, getSystems, initializeDatabase, listProjectFiles, listProjects, prisma, readProjectFile, saveSystem, setProjectSystem, storeThumbnail, withAgentDbTelemetry, writeProjectFile } from './db.js'
 import { getStrategy, projectStrategies } from './strategies.js'
 import { inspectPreviewHtml } from './preview-validation.js'
 
@@ -49,7 +49,7 @@ async function presentationHtml(projectId: string, slide?: number) {
   const hostScript = strategy.previewMode === 'slides'
     ? `<script id="opendesign-host-scaler">(()=>{const slides=[...document.querySelectorAll('${selectors}')];const fit=()=>{const s=document.querySelector('.stage');if(!s)return;const w=s.offsetWidth||1280,h=s.offsetHeight||720;s.style.scale=String(Math.min(innerWidth/w,innerHeight/h))};const selected=${slide ?? 0};if(selected>0&&slides.length){slides.forEach((s,i)=>{const on=i===selected-1;s.classList.toggle('active',on);s.setAttribute('aria-hidden',String(!on))});const counter=document.getElementById('counter');if(counter)counter.textContent=String(selected).padStart(2,'0')+' / '+String(slides.length);const progress=document.getElementById('progress');if(progress)progress.style.width=(selected/slides.length*100)+'%'}document.addEventListener('click',event=>{const el=event.target.closest('.slide h1,.slide h2,.slide h3,.slide p,.slide button,.slide a,.slide [data-od-id]');if(!el)return;const section=el.closest('${selectors}');const index=section?slides.indexOf(section)+1:${slide ?? 1};const label=(el.innerText||el.getAttribute('aria-label')||el.getAttribute('data-od-id')||el.tagName).replace(/\\s+/g,' ').trim().slice(0,140);parent.postMessage({type:'opendesign-target',slide:index,label,tag:el.tagName.toLowerCase()},'*')},true);addEventListener('resize',fit);addEventListener('load',fit);requestAnimationFrame(fit)})();</script>`
     : `<script>document.addEventListener('click',event=>{const el=event.target.closest('h1,h2,h3,p,button,a,[data-od-id]');if(el)parent.postMessage({type:'opendesign-target',slide:1,label:(el.innerText||el.tagName).slice(0,140),tag:el.tagName.toLowerCase()},'*')},true)</script>`
-  const hostNavigation = strategy.previewMode === 'slides' ? `<script id="opendesign-host-navigation">document.addEventListener('keydown',event=>{if(event.target instanceof Element&&event.target.closest('input,textarea,select,[contenteditable=true]'))return;const next=['ArrowRight','ArrowDown','PageDown',' '].includes(event.key);const previous=['ArrowLeft','ArrowUp','PageUp'].includes(event.key);if(!next&&!previous)return;event.preventDefault();parent.postMessage({type:'opendesign-navigation',delta:next?1:-1},'*')},true)</script>` : ''
+  const hostNavigation = strategy.previewMode === 'slides' ? `<script id="opendesign-host-navigation">document.body.tabIndex=-1;window.focus();document.addEventListener('keydown',event=>{if(event.target instanceof Element&&event.target.closest('input,textarea,select,[contenteditable=true]'))return;const next=['ArrowRight','ArrowDown','PageDown',' '].includes(event.key);const previous=['ArrowLeft','ArrowUp','PageUp'].includes(event.key);if(!next&&!previous)return;event.preventDefault();parent.postMessage({type:'opendesign-navigation',delta:next?1:-1},'*')},true)</script>` : ''
   return html.includes('</head>')
     ? html.replace('</head>', `<style>${theme}</style>${hostStyles}</head>`).replace('</body>', `${hostScript}${hostNavigation}</body>`)
     : `<style>${theme}</style>${hostStyles}${html}${hostScript}${hostNavigation}`
@@ -265,7 +265,7 @@ async function runTurn(jobId: string, projectId: string, prompt: string, model: 
     const targetInstruction = slide ? `The user explicitly targeted ${strategy.previewMode === 'slides' ? 'slide' : 'component'} ${slide}. Preserve unrelated content. Current files: ${fileList.join(', ')}.` : `Apply this request to the ${strategy.title.toLowerCase()}.`
     const agentModel = wrapLanguageModel({ model: openrouter(model), middleware: agentTelemetryMiddleware(job) })
     job.liveText = ''
-    let result = streamText({
+    const result = streamText({
       model: agentModel,
       prompt: `${targetInstruction}\n\nConversation so far:\n${messages.slice(-12).map(message => `${message.role}: ${message.text}`).join('\n')}\n\nCurrent request: ${prompt}`,
       stopWhen: stepCountIs(18),
@@ -273,6 +273,7 @@ async function runTurn(jobId: string, projectId: string, prompt: string, model: 
       tools: authorTools(job, projectId, strategy.id),
       onChunk: ({ chunk }) => { if (chunk.type === 'text-delta') job.liveText += chunk.text },
     })
+    let reply = await result.text
     let currentHtml = await readProjectFile(projectId, 'index.html').catch(() => '')
     let inspection = await inspectPreviewHtml(await presentationHtml(projectId))
     if (currentHtml !== beforeHtml && !inspection.empty) {
@@ -294,7 +295,7 @@ async function runTurn(jobId: string, projectId: string, prompt: string, model: 
         const visualReply = await visualReview.text
         if (visualReply.trim()) {
           job.liveText = visualReply
-          result = visualReview
+          reply = visualReply
         }
       } catch (error) {
         activity(job, 'warning', 'Visual screenshot review was unavailable for this model', error instanceof Error ? error.message : String(error))
@@ -302,7 +303,7 @@ async function runTurn(jobId: string, projectId: string, prompt: string, model: 
       currentHtml = await readProjectFile(projectId, 'index.html').catch(() => '')
       inspection = await inspectPreviewHtml(await presentationHtml(projectId))
     }
-    let reply = await result.text || `Updated ${strategy.title.toLowerCase()}.`
+    reply ||= `Updated ${strategy.title.toLowerCase()}.`
     if (inspection.empty) {
       if (currentHtml && currentHtml !== recoveryHtml) await writeProjectFile(projectId, 'recovery/empty-preview.html', currentHtml)
       await writeProjectFile(projectId, 'index.html', recoveryHtml)
@@ -373,7 +374,7 @@ const router = t.router({
       const run = await prisma.agentRun.create({ data: { projectId: input.projectId, model: input.model, prompt: input.prompt } })
       const job: Job = { runId: run.id, projectId: input.projectId, done: false, events: [], liveText: '', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, eventWrites: Promise.resolve() }
       jobs.set(id, job)
-      void runTurn(id, input.projectId, input.prompt, input.model, input.slide)
+      void withAgentDbTelemetry((table, operation) => activity(job, 'database', `${operation} · ${table}`, undefined, [table]), () => runTurn(id, input.projectId, input.prompt, input.model, input.slide))
       return { id }
     }),
     job: t.procedure.input(z.object({ id: z.string() })).query(({ input }) => {

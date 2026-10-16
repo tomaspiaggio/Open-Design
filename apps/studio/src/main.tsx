@@ -11,9 +11,9 @@ import './styles.css'
 const trpc = createTRPCProxyClient<AppRouter>({ links: [httpBatchLink({ url: 'http://localhost:8787/trpc' })] })
 type Slide = { index: number; id: string; title: string }
 type Message = { id: string; role: 'user' | 'assistant'; text: string; createdAt: string }
-type Event = { id: string; type: string; text: string; detail?: string; createdAt: string }
+type Event = { id: string; type: string; text: string; detail?: string; tables?: string[]; createdAt: string }
 type Job = { done: boolean; error?: string; events: Event[]; liveText: string; usage: { inputTokens: number; outputTokens: number; totalTokens: number } }
-type AgentRun = { id: string; model: string; status: string; inputTokens: number; outputTokens: number; totalTokens: number; startedAt: string; completedAt: string | null; error: string | null; events: Array<Event & { tables: string[] }> }
+type AgentRun = { id: string; model: string; prompt: string; status: string; inputTokens: number; outputTokens: number; totalTokens: number; startedAt: string; completedAt: string | null; error: string | null; events: Array<Event & { tables: string[] }> }
 type ProjectSummary = { id: string; title: string; description: string; strategy: string; thumbnailData: string | null; active: boolean; createdAt: string; updatedAt: string; sourceBytes: number }
 type Strategy = { id: string; title: string; description: string; icon: string; firstQuestion: string }
 
@@ -90,7 +90,6 @@ function App() {
       setSystems(data.systems.map(system => ({ id: system.id, name: system.name })))
       setSystemId(data.activeSystem.id)
       setTokens(data.activeSystem.tokens as unknown as DesignTokens)
-      setActivityTab('conversation')
       setLiveDraft('')
       setLiveUsage({ inputTokens: 0, outputTokens: 0, totalTokens: 0 })
       void loadAgentRuns(id)
@@ -134,6 +133,19 @@ function App() {
     window.addEventListener('message', onTarget)
     return () => window.removeEventListener('message', onTarget)
   }, [projectId, selectedSlide, slides, strategyId])
+  useEffect(() => {
+    const onPresentationKey = (event: KeyboardEvent) => {
+      if (document.fullscreenElement !== frame.current || strategyId !== 'presentation') return
+      if (event.target instanceof Element && event.target.closest('input,textarea,select,[contenteditable=true]')) return
+      const delta = ['ArrowRight', 'ArrowDown', 'PageDown', ' '].includes(event.key) ? 1 : ['ArrowLeft', 'ArrowUp', 'PageUp'].includes(event.key) ? -1 : 0
+      if (!delta) return
+      event.preventDefault()
+      const nextIndex = Math.max(1, Math.min(slides.length, selectedSlide + delta))
+      if (nextIndex !== selectedSlide) void chooseSlide(slides[nextIndex - 1])
+    }
+    document.addEventListener('keydown', onPresentationKey, true)
+    return () => document.removeEventListener('keydown', onPresentationKey, true)
+  }, [selectedSlide, slides, strategyId])
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [messages, activity])
 
   useEffect(() => {
@@ -315,7 +327,11 @@ function App() {
   }
 
   async function present() {
-    try { await frame.current?.requestFullscreen() }
+    try {
+      await frame.current?.requestFullscreen()
+      frame.current?.focus()
+      frame.current?.contentWindow?.focus()
+    }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not enter presentation mode.') }
   }
 
@@ -379,11 +395,12 @@ function AgentActivityPanel({ runs, events, liveUsage, busy }: { runs: AgentRun[
   const completedUsage = runs.reduce((total, run) => ({ input: total.input + run.inputTokens, output: total.output + run.outputTokens, all: total.all + run.totalTokens }), { input: 0, output: 0, all: 0 })
   const tables = new Map<string, number>()
   for (const run of runs) for (const event of run.events) for (const table of event.tables) tables.set(table, (tables.get(table) ?? 0) + 1)
+  for (const event of events) for (const table of event.tables ?? []) tables.set(table, (tables.get(table) ?? 0) + 1)
   return <div className="agent-activity-view">
     <section className="telemetry-summary">
       <div className="telemetry-heading"><div><span className="overline">AGENT MIDDLEWARE</span><strong>{busy ? 'Run in progress' : 'Usage & database activity'}</strong></div><span className={busy ? 'run-status running' : 'run-status'}>{busy ? 'LIVE' : `${runs.length} RUNS`}</span></div>
       <div className="token-summary"><div><span>Input tokens</span><strong>{(completedUsage.input + (busy ? liveUsage.inputTokens : 0)).toLocaleString()}</strong></div><div><span>Output tokens</span><strong>{(completedUsage.output + (busy ? liveUsage.outputTokens : 0)).toLocaleString()}</strong></div><div><span>Total tokens</span><strong>{(completedUsage.all + (busy ? liveUsage.totalTokens : 0)).toLocaleString()}</strong></div></div>
-      <div className="database-summary"><span>DATABASE TABLES TOUCHED</span>{tables.size ? <div>{[...tables].map(([table, count]) => <span className="table-chip" key={table}>{table}<b>{count}</b></span>)}</div> : <small>No agent database operations recorded yet.</small>}</div>
+      <div className="database-summary"><span>DATABASE TABLES TOUCHED · QUERY COUNT</span>{tables.size ? <div>{[...tables].map(([table, count]) => <span className="table-chip" key={table}>{table}<b>{count}</b></span>)}</div> : <small>No agent database operations recorded yet.</small>}</div>
     </section>
     {busy && events.length > 0 && <section className="run-events"><h3>Current run</h3>{events.map(event => <ActivityEvent key={event.id} event={event}/>)}</section>}
     <section className="run-history"><h3>Recent agent runs</h3>{runs.length ? runs.map(run => <article className="run-card" key={run.id}>

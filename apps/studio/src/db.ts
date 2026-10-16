@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -8,8 +9,24 @@ import type { DesignTokens } from './project.js'
 
 const globalForPrisma = globalThis as typeof globalThis & { openDesignPrisma?: PrismaClient }
 process.env.DATABASE_URL ??= 'postgresql://opendesign:opendesign@localhost:5432/opendesign?schema=public'
-export const prisma = globalForPrisma.openDesignPrisma ?? new PrismaClient()
-if (process.env.NODE_ENV !== 'production') globalForPrisma.openDesignPrisma = prisma
+const basePrisma = globalForPrisma.openDesignPrisma ?? new PrismaClient()
+if (process.env.NODE_ENV !== 'production') globalForPrisma.openDesignPrisma = basePrisma
+const agentDbContext = new AsyncLocalStorage<(model: string, operation: string) => void>()
+export const prisma = basePrisma.$extends({
+  query: {
+    $allModels: {
+      async $allOperations({ model, operation, args, query }) {
+        const onQuery = agentDbContext.getStore()
+        if (onQuery && model !== 'AgentRun' && model !== 'AgentRunEvent') onQuery(model, operation)
+        return query(args)
+      },
+    },
+  },
+})
+
+export function withAgentDbTelemetry<T>(onQuery: (model: string, operation: string) => void, run: () => Promise<T>) {
+  return agentDbContext.run(onQuery, run)
+}
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const generatedRoot = join(here, '../generated')

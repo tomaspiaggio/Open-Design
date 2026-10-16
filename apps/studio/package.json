@@ -1,5 +1,6 @@
 {
   "name": "@opendesign/studio",
+  "license": "Apache-2.0",
   "private": true,
   "version": "0.0.0",
   "type": "module",
