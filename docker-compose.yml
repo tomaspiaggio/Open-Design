@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: opendesign
+      POSTGRES_PASSWORD: opendesign
+      POSTGRES_DB: opendesign
+    ports:
+      - "5432:5432"
+    volumes:
+      - opendesign-postgres:/var/lib/postgresql/data
+
+volumes:
+  opendesign-postgres:

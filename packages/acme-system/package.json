@@ -1,0 +1,11 @@
+{
+  "name": "@opendesign/acme-system",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    "./theme.css": "./theme.css",
+    "./tokens.json": "./tokens.json",
+    "./tailwind.preset": "./tailwind.preset.ts"
+  }
+}

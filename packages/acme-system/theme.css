@@ -1,0 +1,22 @@
+/* Prototype design-system package. Tailwind v4 apps can import this file directly. */
+@theme {
+  --color-ink: #111827;
+  --color-canvas: #F8FAFC;
+  --color-brand: #4F46E5;
+  --color-accent: #F97316;
+  --color-muted: #64748B;
+  --font-display: Inter, ui-sans-serif, system-ui, sans-serif;
+  --font-body: Inter, ui-sans-serif, system-ui, sans-serif;
+  --radius-card: 24px;
+}
+
+:root {
+  /* Direct values make this file usable in a raw HTML presentation as well. */
+  --od-ink: #111827;
+  --od-canvas: #F8FAFC;
+  --od-brand: #4F46E5;
+  --od-accent: #F97316;
+  --od-muted: #64748B;
+  --od-font-display: Inter, ui-sans-serif, system-ui, sans-serif;
+  --od-font-body: Inter, ui-sans-serif, system-ui, sans-serif;
+}

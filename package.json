@@ -1,0 +1,17 @@
+{
+  "name": "opendesign",
+  "private": true,
+  "packageManager": "pnpm@10.10.0",
+  "scripts": {
+    "dev": "pnpm db:setup && turbo dev",
+    "build": "turbo build",
+    "typecheck": "turbo typecheck",
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose stop postgres",
+    "db:setup": "pnpm db:up && pnpm --filter @opendesign/studio db:generate && DATABASE_URL=postgresql://opendesign:opendesign@localhost:5432/opendesign?schema=public pnpm --filter @opendesign/studio exec prisma migrate deploy"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.8",
+    "typescript": "^5.9.3"
+  }
+}
