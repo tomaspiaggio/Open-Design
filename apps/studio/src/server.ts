@@ -15,6 +15,7 @@ import { liveThemeCss, normalizeDesignSystemDocument, synchronizeFoundationToken
 import { activateProject, addMessage, clearProjectMessages, createProject, createSystem, getProject, getProjectMessages, getSystem, getSystems, initializeDatabase, listProjectFiles, listProjects, prisma, readProjectFile, saveSystem, setProjectSystem, storeThumbnail, withAgentDbTelemetry, writeProjectFile } from './db.js'
 import { getStrategy, projectStrategies } from './strategies.js'
 import { inspectPreviewHtml } from './preview-validation.js'
+import { presentationHostStyles, presentationNavigationScript, presentationThumbnailTarget } from './presentation-preview.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 config({ path: join(here, '../../../.env') })
@@ -43,26 +44,14 @@ async function presentationHtml(projectId: string, slide?: number) {
   }).filter(Boolean).join('\n') : ''
   const theme = `${shadcnVars ? `${shadcnVars}\n` : ''}${liveThemeCss(tokens)}`
   const strategy = getStrategy(project.strategy)
-  const hostStyles = strategy.previewMode === 'canvas'
-    ? `<style id="opendesign-host-styles">html,body{width:100%;height:100%;overflow:auto}</style>`
-    : `<style id="opendesign-host-styles">html,body{width:100%;height:100%;overflow:hidden}</style>`
-  const selectors = '.slide,[data-od-slide]'
+  const hostStyles = `<style id="opendesign-host-styles">${presentationHostStyles(html, strategy.previewMode)}</style>`
   const hostScript = strategy.previewMode === 'slides'
-    ? `<script id="opendesign-host-scaler">(()=>{
-      const slides=[...document.querySelectorAll('${selectors}')];
-      const fit=()=>{const s=document.querySelector('.stage');if(!s)return;const w=s.offsetWidth||1280,h=s.offsetHeight||720;s.style.scale=String(Math.min(innerWidth/w,innerHeight/h))};
-      const selectSlide=index=>{const selected=Number(index);if(!Number.isInteger(selected)||selected<1||selected>slides.length)return;slides.forEach((s,i)=>{const on=i===selected-1;s.classList.toggle('active',on);s.setAttribute('aria-hidden',String(!on))});const counter=document.getElementById('counter');if(counter)counter.textContent=String(selected).padStart(2,'0')+' / '+String(slides.length);const progress=document.getElementById('progress');if(progress)progress.style.width=(selected/slides.length*100)+'%'};
-      selectSlide(${slide ?? 0});
-      addEventListener('message',event=>{if(event.source!==parent||event.data?.type!=='opendesign-select-slide')return;selectSlide(event.data.index)});
-      document.addEventListener('click',event=>{const el=event.target.closest('.slide h1,.slide h2,.slide h3,.slide p,.slide button,.slide a,.slide [data-od-id]');if(!el)return;const section=el.closest('${selectors}');const index=section?slides.indexOf(section)+1:${slide ?? 1};const label=(el.innerText||el.getAttribute('aria-label')||el.getAttribute('data-od-id')||el.tagName).replace(/\\s+/g,' ').trim().slice(0,140);parent.postMessage({type:'opendesign-target',slide:index,label,tag:el.tagName.toLowerCase()},'*')},true);
-      addEventListener('resize',fit);addEventListener('load',fit);requestAnimationFrame(fit);
-    })();</script>`
+    ? presentationNavigationScript(slide ?? 0)
     : `<script>document.addEventListener('click',event=>{const el=event.target.closest('h1,h2,h3,p,button,a,[data-od-id]');if(el)parent.postMessage({type:'opendesign-target',slide:1,label:(el.innerText||el.tagName).slice(0,140),tag:el.tagName.toLowerCase()},'*')},true)</script>`
-  const hostNavigation = strategy.previewMode === 'slides' ? `<script id="opendesign-host-navigation">document.body.tabIndex=-1;window.focus();document.addEventListener('keydown',event=>{if(event.target instanceof Element&&event.target.closest('input,textarea,select,[contenteditable=true]'))return;const next=['ArrowRight','ArrowDown','PageDown',' '].includes(event.key);const previous=['ArrowLeft','ArrowUp','PageUp'].includes(event.key);if(!next&&!previous)return;event.preventDefault();parent.postMessage({type:'opendesign-navigation',delta:next?1:-1},'*')},true)</script>` : ''
   const hostTheme = `<script id="opendesign-host-theme">addEventListener('message',event=>{if(event.source!==parent||event.data?.type!=='opendesign-theme')return;let style=document.getElementById('opendesign-live-theme');if(!style){style=document.createElement('style');style.id='opendesign-live-theme';document.head.append(style)}style.textContent=event.data.css})</script>`
   return html.includes('</head>')
-    ? html.replace('</head>', `<style>${theme}</style>${hostStyles}</head>`).replace('</body>', `${hostScript}${hostNavigation}${hostTheme}</body>`)
-    : `<style>${theme}</style>${hostStyles}${html}${hostScript}${hostNavigation}${hostTheme}`
+    ? html.replace('</head>', `<style>${theme}</style>${hostStyles}</head>`).replace('</body>', `${hostScript}${hostTheme}</body>`)
+    : `<style>${theme}</style>${hostStyles}${html}${hostScript}${hostTheme}`
 }
 
 async function thumbnailHtml(projectId: string) {
@@ -131,9 +120,7 @@ async function renderSlideThumbnail(projectId: string, index: number) {
     try {
       await page.setContent(await presentationHtml(projectId, index), { waitUntil: 'networkidle' })
       await page.evaluate(async () => { await document.fonts.ready })
-      const stage = page.locator('.stage').first()
-      const slide = page.locator('.slide, [data-od-slide]').first()
-      const target = await stage.count() ? stage : await slide.count() ? slide : page.locator('body')
+      const target = await presentationThumbnailTarget(page, index)
       const image = `data:image/png;base64,${(await target.screenshot({ type: 'png', animations: 'disabled' })).toString('base64')}`
       slideThumbnailCache.set(key, image)
       return image

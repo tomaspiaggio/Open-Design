@@ -145,9 +145,12 @@ function App() {
   useEffect(() => {
     const onTarget = (event: MessageEvent) => {
       if (event.source !== frame.current?.contentWindow) return
-      if (event.data?.type === 'opendesign-navigation') {
-        const nextIndex = Math.max(1, Math.min(slides.length, selectedSlide + Number(event.data.delta || 0)))
-        if (nextIndex !== selectedSlide) void chooseSlide(slides[nextIndex - 1])
+      if (event.data?.type === 'opendesign-slide-changed') {
+        const slide = Number(event.data.slide)
+        if (!Number.isInteger(slide) || slide < 1 || slide > slides.length) return
+        setSelectedSlide(slide)
+        setSelectedElement(null)
+        setProjectUrl(projectId, slide, 'replace')
         return
       }
       if (event.data?.type !== 'opendesign-target') return
