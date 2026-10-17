@@ -1,17 +1,9 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import starterTokens from '../../../packages/acme-system/tokens.json'
+import type { DesignTokens } from './theme.js'
 
-export type DesignTokens = {
-  name: string
-  /** A portable shadcn/Tailwind v4 theme stylesheet, when this system was imported from one. */
-  shadcnCss?: string
-  tokens: {
-    color: { ink: string; canvas: string; brand: string; accent: string; muted: string }
-    font: { display: string; body: string }
-    radius: { card: string }
-  }
-}
+export type { DesignTokens } from './theme.js'
 
 const generatedRoot = join(import.meta.dirname, '../generated')
 const systemsRoot = join(generatedRoot, 'design-systems')

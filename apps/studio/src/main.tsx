@@ -1,14 +1,17 @@
-import { createTRPCProxyClient, httpBatchLink } from '@trpc/client'
+import { createTRPCProxyClient, httpBatchLink, httpLink } from '@trpc/client'
 import JSZip from 'jszip'
 import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { AppRouter } from './server'
-import type { DesignTokens } from './project'
+import { liveThemeCss, synchronizeFoundationTokens, type DesignTokens } from './theme'
+import { AsyncValueCache } from './slide-cache'
 import './styles.css'
 
 const trpc = createTRPCProxyClient<AppRouter>({ links: [httpBatchLink({ url: 'http://localhost:8787/trpc' })] })
+const thumbnailTrpc = createTRPCProxyClient<AppRouter>({ links: [httpLink({ url: 'http://localhost:8787/trpc' })] })
+const slideThumbnailCache = new AsyncValueCache<string>()
 type Slide = { index: number; id: string; title: string }
 type Message = { id: string; role: 'user' | 'assistant'; text: string; createdAt: string }
 type Event = { id: string; type: string; text: string; detail?: string; tables?: string[]; createdAt: string }
@@ -17,11 +20,16 @@ type AgentRun = { id: string; model: string; prompt: string; status: string; inp
 type ProjectSummary = { id: string; title: string; description: string; strategy: string; thumbnailData: string | null; active: boolean; createdAt: string; updatedAt: string; sourceBytes: number }
 type Strategy = { id: string; title: string; description: string; icon: string; firstQuestion: string }
 
+function loadSlideThumbnail(projectId: string, index: number, themeRevision: number) {
+  return slideThumbnailCache.getOrLoad(`${projectId}:${themeRevision}:${index}`, async () =>
+    (await thumbnailTrpc.project.slideThumbnail.query({ projectId, index })).image,
+  )
+}
+
 function App() {
   const [page, setPage] = useState<'home' | 'studio'>('home')
   const [galleryLoading, setGalleryLoading] = useState(true)
   const [projectLoading, setProjectLoading] = useState(false)
-  const [slideLoading, setSlideLoading] = useState(false)
   const [model, setModel] = useState('z-ai/glm-5.3-flash')
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [strategies, setStrategies] = useState<Strategy[]>([])
@@ -38,9 +46,12 @@ function App() {
   const [selectedSlide, setSelectedSlide] = useState(1)
   const [selectedElement, setSelectedElement] = useState<{ slide: number; label: string; tag: string } | null>(null)
   const [previewHtml, setPreviewHtml] = useState('')
+  const [frameReady, setFrameReady] = useState(false)
   const [systems, setSystems] = useState<Array<{ id: string; name: string }>>([])
   const [systemId, setSystemId] = useState('acme')
   const [tokens, setTokens] = useState<DesignTokens | null>(null)
+  const [tokensDirty, setTokensDirty] = useState(false)
+  const [themeRevision, setThemeRevision] = useState(0)
   const [activity, setActivity] = useState<Event[]>([])
   const [agentRuns, setAgentRuns] = useState<AgentRun[]>([])
   const [activityTab, setActivityTab] = useState<'conversation' | 'activity'>('conversation')
@@ -52,9 +63,13 @@ function App() {
   const [systemName, setSystemName] = useState('')
   const [savingSystem, setSavingSystem] = useState(false)
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null)
-  const slideRequest = useRef(0)
   const frame = useRef<HTMLIFrameElement>(null)
-  const chatEnd = useRef<HTMLDivElement>(null)
+  const stage = useRef<HTMLDivElement>(null)
+  const conversation = useRef<HTMLDivElement>(null)
+  const followChat = useRef(true)
+  const tokenRevision = useRef(0)
+  const tokenSaveTimer = useRef<number | undefined>(undefined)
+  const tokenSaveQueue = useRef<Promise<void>>(Promise.resolve())
 
   async function loadGallery() {
     setGalleryLoading(true)
@@ -74,6 +89,9 @@ function App() {
   }
 
   async function loadStudio(id: string, slide = selectedSlide, showSkeleton = false) {
+    const previousPreview = previewHtml
+    setFrameReady(false)
+    slideThumbnailCache.invalidate()
     if (showSkeleton) { setPage('studio'); setProjectLoading(true) }
     try {
       const data = await trpc.project.load.query({ id, slide })
@@ -87,17 +105,20 @@ function App() {
       setSelectedSlide(nextSlide)
       setSelectedElement(null)
       setPreviewHtml(data.html)
+      setThemeRevision(current => current + 1)
+      if (data.html === previousPreview) setFrameReady(true)
       setSystems(data.systems.map(system => ({ id: system.id, name: system.name })))
       setSystemId(data.activeSystem.id)
       setTokens(data.activeSystem.tokens as unknown as DesignTokens)
+      tokenRevision.current += 1
+      setTokensDirty(false)
       setLiveDraft('')
       setLiveUsage({ inputTokens: 0, outputTokens: 0, totalTokens: 0 })
       void loadAgentRuns(id)
-      setSlideLoading(false)
       setError('')
       setProjectUrl(id, nextSlide, 'replace')
-      if (data.project.strategy === 'presentation') void trpc.project.slideThumbnail.query({ projectId: id, index: nextSlide }).catch(() => undefined)
     } catch (cause) {
+      setFrameReady(Boolean(previousPreview))
       if (showSkeleton) setPage('home')
       setError(cause instanceof Error ? cause.message : 'Could not load this project.')
     } finally { if (showSkeleton) setProjectLoading(false) }
@@ -118,6 +139,10 @@ function App() {
     return () => window.removeEventListener('popstate', navigateFromUrl)
   }, [])
   useEffect(() => {
+    if (page !== 'studio' || strategyId !== 'presentation' || !projectId || !slides.length) return
+    for (const slide of slides) void loadSlideThumbnail(projectId, slide.index, themeRevision).catch(() => undefined)
+  }, [page, projectId, strategyId, slides, themeRevision])
+  useEffect(() => {
     const onTarget = (event: MessageEvent) => {
       if (event.source !== frame.current?.contentWindow) return
       if (event.data?.type === 'opendesign-navigation') {
@@ -135,7 +160,7 @@ function App() {
   }, [projectId, selectedSlide, slides, strategyId])
   useEffect(() => {
     const onPresentationKey = (event: KeyboardEvent) => {
-      if (document.fullscreenElement !== frame.current || strategyId !== 'presentation') return
+      if (document.fullscreenElement !== stage.current || strategyId !== 'presentation') return
       if (event.target instanceof Element && event.target.closest('input,textarea,select,[contenteditable=true]')) return
       const delta = ['ArrowRight', 'ArrowDown', 'PageDown', ' '].includes(event.key) ? 1 : ['ArrowLeft', 'ArrowUp', 'PageUp'].includes(event.key) ? -1 : 0
       if (!delta) return
@@ -146,7 +171,26 @@ function App() {
     document.addEventListener('keydown', onPresentationKey, true)
     return () => document.removeEventListener('keydown', onPresentationKey, true)
   }, [selectedSlide, slides, strategyId])
-  useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [messages, activity])
+  useEffect(() => {
+    const chat = conversation.current
+    if (chat && followChat.current) chat.scrollTop = chat.scrollHeight
+  }, [messages, activity, liveDraft, liveUsage, busy])
+  useEffect(() => {
+    if (!tokens) return
+    frame.current?.contentWindow?.postMessage({ type: 'opendesign-theme', css: liveThemeCss(tokens) }, '*')
+  }, [tokens, previewHtml])
+  useEffect(() => {
+    if (!tokens || !tokensDirty || !projectId) return
+    const snapshot = tokens
+    const revision = tokenRevision.current
+    const id = systemId
+    tokenSaveTimer.current = window.setTimeout(() => {
+      void persistTokenSnapshot(id, snapshot, revision).catch(cause => {
+        if (revision === tokenRevision.current) setError(cause instanceof Error ? cause.message : 'Could not save the design system.')
+      })
+    }, 600)
+    return () => window.clearTimeout(tokenSaveTimer.current)
+  }, [tokens, tokensDirty, projectId, systemId])
 
   useEffect(() => {
     if (!jobId || !busy) return
@@ -209,6 +253,7 @@ function App() {
 
   async function startTurn(text: string, id = projectId, targetSlide?: number) {
     if (!text.trim() || busy || !id) return
+    followChat.current = true
     setBusy(true); setError(''); setActivity([]); setSelectedElement(null)
     try {
       const result = await trpc.project.startTurn.mutate({ projectId: id, prompt: text, model, ...(targetSlide ? { slide: targetSlide } : {}) })
@@ -234,19 +279,10 @@ function App() {
     await startTurn(request, projectId, match ? Number(match[1]) : undefined)
   }
 
-  async function chooseSlide(slide: Slide) {
+  function chooseSlide(slide: Slide) {
     setSelectedSlide(slide.index); setSelectedElement(null)
-    setPreviewHtml('')
-    setSlideLoading(true)
     setProjectUrl(projectId, slide.index, 'replace')
-    const request = ++slideRequest.current
-    try {
-      const result = await trpc.project.setSlide.query({ projectId, index: slide.index })
-      if (request === slideRequest.current) setPreviewHtml(result.html)
-      void trpc.project.slideThumbnail.query({ projectId, index: slide.index }).catch(() => undefined)
-    }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not load the selected slide.') }
-    finally { if (request === slideRequest.current) setSlideLoading(false) }
+    frame.current?.contentWindow?.postMessage({ type: 'opendesign-select-slide', index: slide.index }, '*')
   }
 
   function targetSlide() {
@@ -272,13 +308,33 @@ function App() {
 
   async function saveTokens() {
     if (!tokens) return
-    setSavingSystem(true)
+    window.clearTimeout(tokenSaveTimer.current)
     try {
-      await trpc.project.saveDesignSystem.mutate({ projectId, id: systemId, tokens })
-      await loadStudio(projectId)
+      const revision = tokenRevision.current
+      await persistTokenSnapshot(systemId, tokens, revision)
       setActivity([{ id: crypto.randomUUID(), type: 'success', text: `Saved ${tokens.name}`, detail: 'Token JSON, theme CSS, and Tailwind preset were updated.', createdAt: new Date().toISOString() }])
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save the design system.') }
+  }
+
+  async function persistTokenSnapshot(id: string, snapshot: DesignTokens, revision: number) {
+    setSavingSystem(true)
+    const save = tokenSaveQueue.current.catch(() => undefined).then(async () => {
+      await trpc.project.saveDesignSystem.mutate({ projectId, id, tokens: snapshot })
+      if (revision === tokenRevision.current) {
+        setTokensDirty(false)
+        slideThumbnailCache.invalidate()
+        setThemeRevision(current => current + 1)
+      }
+    })
+    tokenSaveQueue.current = save.then(() => undefined, () => undefined)
+    try { await save }
     finally { setSavingSystem(false) }
+  }
+
+  function editTokens(update: (current: DesignTokens) => DesignTokens) {
+    tokenRevision.current += 1
+    setTokens(current => current ? synchronizeFoundationTokens(update(current)) : current)
+    setTokensDirty(true)
   }
 
   async function createSystem() {
@@ -291,7 +347,11 @@ function App() {
   }
 
   async function changeSystem(id: string) {
-    try { await trpc.project.selectDesignSystem.mutate({ projectId, id }); await loadStudio(projectId) }
+    try {
+      window.clearTimeout(tokenSaveTimer.current)
+      if (tokens && tokensDirty) await persistTokenSnapshot(systemId, tokens, tokenRevision.current)
+      await trpc.project.selectDesignSystem.mutate({ projectId, id }); await loadStudio(projectId)
+    }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not switch design system.') }
   }
 
@@ -328,8 +388,11 @@ function App() {
 
   async function present() {
     try {
-      await frame.current?.requestFullscreen()
-      frame.current?.focus()
+      if (!frameReady || !slides.length) return
+      const presentationStage = stage.current
+      if (!presentationStage) return
+      await presentationStage.requestFullscreen()
+      presentationStage.focus()
       frame.current?.contentWindow?.focus()
     }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not enter presentation mode.') }
@@ -357,7 +420,7 @@ function App() {
   if (projectLoading) return <ProjectLoadingSkeleton />
 
   return <div className="studio editor-shell">
-    <header className="topbar editor-topbar"><div className="project-breadcrumb"><button className="breadcrumb-home" onClick={() => { setProjectUrl('', 1, 'push'); setPage('home'); setProjectId(''); void loadGallery() }}>DESIGN</button><b>/</b><strong>{projectTitle}</strong><em>{strategy?.title ?? strategyId}</em></div><div className="top-actions"><input className="model-input" aria-label="OpenRouter model ID" value={model} onChange={event => setModel(event.target.value)} /><button className="button quiet" onClick={() => void loadStudio(projectId)}>Reload</button>{strategyId === 'presentation' && <button className="button quiet" onClick={() => void present()}>Present ↗</button>}{strategyId === 'presentation' && <button className="button primary" disabled={!slides.length || busy} onClick={() => void exportPdf()}>Export PDF</button>}</div></header>
+    <header className="topbar editor-topbar"><div className="project-breadcrumb"><button className="breadcrumb-home" onClick={() => { setProjectUrl('', 1, 'push'); setPage('home'); setProjectId(''); void loadGallery() }}>DESIGN</button><b>/</b><strong>{projectTitle}</strong><em>{strategy?.title ?? strategyId}</em></div><div className="top-actions"><input className="model-input" aria-label="OpenRouter model ID" value={model} onChange={event => setModel(event.target.value)} /><button className="button quiet" onClick={() => void loadStudio(projectId)}>Reload</button>{strategyId === 'presentation' && <button className="button quiet" disabled={!slides.length || !frameReady || busy} onClick={() => void present()}>{frameReady ? 'Present ↗' : 'Loading deck…'}</button>}{strategyId === 'presentation' && <button className="button primary" disabled={!slides.length || busy} onClick={() => void exportPdf()}>Export PDF</button>}</div></header>
     <main className="editor-layout">
       <aside className="assistant-panel left-panel">
         <div className="assistant-head">
@@ -368,14 +431,16 @@ function App() {
           {activityTab === 'conversation' && <button className="icon-button" title="Clear conversation" onClick={() => void clearConversation()}>＋</button>}
         </div>
         {activityTab === 'conversation' ? <>
-          <div className="conversation">
+          <div className="conversation" ref={conversation} onScroll={event => {
+            const chat = event.currentTarget
+            followChat.current = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 48
+          }}>
             <div className="welcome-card"><span className="assistant-orb">✳</span><div><strong>{strategyId === 'design-system' ? 'Let’s build your visual language.' : 'What should we work on?'}</strong><p>{strategyId === 'presentation' ? 'Discuss the narrative or target any slide/element from the preview.' : 'Tell me where the system will be used. We can explore variants together before settling on foundations and components.'}</p></div></div>
             {messages.map(message => <article key={message.id} className={`message ${message.role}`}><span>{message.role === 'user' ? 'YOU' : 'OPENDESIGN'}</span>{message.role === 'assistant' ? <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown></div> : <p>{message.text}</p>}</article>)}
             {busy && liveDraft && <article className="message assistant streaming-message"><span>OPENDESIGN · RESPONDING</span><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{liveDraft}</ReactMarkdown></div></article>}
             {busy && <div className="live-run-meter"><span>LIVE USAGE</span><strong>{liveUsage.totalTokens.toLocaleString()} tokens</strong><small>{liveUsage.inputTokens.toLocaleString()} in · {liveUsage.outputTokens.toLocaleString()} out</small></div>}
             {activity.length > 0 && <section className="activity"><div className="activity-title"><span className={busy ? 'pulse' : ''}/>{busy ? 'WORKING' : 'LATEST ACTIVITY'}</div>{activity.map(item => <article key={item.id} className={`activity-item ${item.type}`}><span className="activity-marker">{item.type === 'change' ? '↗' : item.type === 'success' ? '✓' : item.type === 'error' || item.type === 'warning' ? '!' : item.type === 'thinking' ? '✳' : '·'}</span><div><strong>{item.text}</strong>{item.detail && <small>{item.detail}</small>}</div></article>)}{busy && <div className="agent-progress"><span/><span/><span/></div>}</section>}
             {error && <div className="error-card"><strong>Needs attention</strong><p>{error}</p><button onClick={() => setError('')}>Dismiss</button></div>}
-            <div ref={chatEnd}/>
           </div>
           <form className="composer" onSubmit={event => void sendMessage(event)}>
             <div className="composer-target"><button type="button" onClick={targetSlide}>@{strategyId === 'presentation' ? 'slide' : 'component'}{selectedSlide}{selectedElement?.slide === selectedSlide ? ` · ${selectedElement.tag.toUpperCase()}` : ''}</button><span>{selectedElement?.slide === selectedSlide ? `“${selectedElement.label}” selected` : 'Click preview content to target it'}</span></div>
@@ -384,9 +449,9 @@ function App() {
           </form>
         </> : <AgentActivityPanel runs={agentRuns} events={activity} liveUsage={liveUsage} busy={busy}/>}
       </aside>
-      <section className="canvas"><div className="canvas-head"><div><span className="overline">{strategy?.title.toUpperCase() ?? 'PROJECT'}</span><strong>{slides.find(slide => slide.index === selectedSlide)?.title ?? projectTitle}</strong></div><div className="canvas-tools">{strategyId === 'presentation' && <><button onClick={() => void chooseSlide(slides[Math.max(0, selectedSlide - 2)] ?? slides[0])} disabled={selectedSlide <= 1}>←</button><span>{String(selectedSlide).padStart(2, '0')} / {String(slides.length).padStart(2, '0')}</span><button onClick={() => void chooseSlide(slides[Math.min(slides.length - 1, selectedSlide)] ?? slides[0])} disabled={selectedSlide >= slides.length}>→</button></>}</div></div><div className="stage-wrap">{previewHtml && !slideLoading ? <iframe ref={frame} title={`${projectTitle} preview`} sandbox="allow-scripts" srcDoc={previewHtml} /> : <div className="preview-skeleton" aria-label="Loading slide preview"><span/><span/><span/></div>}</div><div className="canvas-foot"><span><b className="live-dot"/> Live preview</span><span>{strategyId === 'presentation' ? '16:9 · Source stored in PostgreSQL' : 'HTML/CSS/JS · Source stored in PostgreSQL'}</span></div></section>
-      <aside className="inspector-panel"><div className="inspector-head"><span className="overline">FOUNDATIONS</span><h2>{strategyId === 'design-system' ? 'System in progress' : 'Design system'}</h2><p>{strategyId === 'design-system' ? 'Explore component directions in the preview; save a reusable system when it is ready.' : 'The active system shapes this project and can be reused elsewhere.'}</p></div>{tokens && <div className="system-controls"><label>Active system<Dropdown value={systemId} options={systems} ariaLabel="Active design system" onChange={id => void changeSystem(id)} /></label><label>System name<input value={tokens.name} onChange={event => setTokens({ ...tokens, name: event.target.value })} /></label><div className="color-grid">{colorFields.map(([key, label]) => <label key={key} className="color-field"><span>{label}</span><input type="color" value={tokens.tokens.color[key]} onChange={event => setTokens({ ...tokens, tokens: { ...tokens.tokens, color: { ...tokens.tokens.color, [key]: event.target.value } } })} /></label>)}</div><label>Display font<input value={tokens.tokens.font.display} onChange={event => setTokens({ ...tokens, tokens: { ...tokens.tokens, font: { ...tokens.tokens.font, display: event.target.value } } })} /></label><label>Body font<input value={tokens.tokens.font.body} onChange={event => setTokens({ ...tokens, tokens: { ...tokens.tokens, font: { ...tokens.tokens.font, body: event.target.value } } })} /></label><button className="button primary full" onClick={() => void saveTokens()} disabled={savingSystem}>{savingSystem ? 'Saving…' : 'Save & use system'}</button><button className="button quiet full" onClick={importShadcnTheme}>Load shadcn globals.css</button><button className="button quiet full" onClick={() => void downloadSystem()}>Download shadcn theme bundle</button><div className="new-system"><input placeholder="New system name" value={systemName} onChange={event => setSystemName(event.target.value)} /><button className="button quiet" onClick={() => void createSystem()}>＋</button></div></div>}<div className="inspector-storage"><span>PROJECT STORAGE</span><strong>{formatSize((previewHtml.length || 0) + messages.reduce((sum, message) => sum + message.text.length, 0))}</strong><small>Saved automatically to Postgres</small></div></aside>
-      <nav className="filmstrip"><div className="filmstrip-title"><span>{strategyId === 'presentation' ? 'SLIDES' : 'ARTBOARD'}</span><span>{strategyId === 'presentation' ? `${String(slides.length).padStart(2, '0')} TOTAL` : 'LIVE PREVIEW'}</span></div><div className="filmstrip-items">{slides.map(slide => <button key={slide.id} className={`film-card ${selectedSlide === slide.index ? 'selected' : ''}`} onClick={() => void chooseSlide(slide)} aria-label={`Show slide ${slide.index}: ${slide.title}`}><SlideThumbnail projectId={projectId} slide={slide} selected={selectedSlide === slide.index} /><small>{slide.title}</small></button>)}</div></nav>
+      <section className="canvas"><div className="canvas-head"><div><span className="overline">{strategy?.title.toUpperCase() ?? 'PROJECT'}</span><strong>{slides.find(slide => slide.index === selectedSlide)?.title ?? projectTitle}</strong></div><div className="canvas-tools">{strategyId === 'presentation' && <><button onClick={() => void chooseSlide(slides[Math.max(0, selectedSlide - 2)] ?? slides[0])} disabled={selectedSlide <= 1}>←</button><span>{String(selectedSlide).padStart(2, '0')} / {String(slides.length).padStart(2, '0')}</span><button onClick={() => void chooseSlide(slides[Math.min(slides.length - 1, selectedSlide)] ?? slides[0])} disabled={selectedSlide >= slides.length}>→</button></>}</div></div><div ref={stage} className="stage-wrap" tabIndex={-1} aria-busy={!frameReady}>{previewHtml ? <iframe ref={frame} title={`${projectTitle} preview`} sandbox="allow-scripts" srcDoc={previewHtml} onLoad={() => { if (tokens) frame.current?.contentWindow?.postMessage({ type: 'opendesign-theme', css: liveThemeCss(tokens) }, '*'); setFrameReady(true) }} /> : <div className="preview-skeleton" aria-label="Loading slide preview"><span/><span/><span/></div>}</div><div className="canvas-foot"><span><b className="live-dot"/> Live preview</span><span>{strategyId === 'presentation' ? '16:9 · Source stored in PostgreSQL' : 'HTML/CSS/JS · Source stored in PostgreSQL'}</span></div></section>
+      <aside className="inspector-panel"><div className="inspector-head"><span className="overline">FOUNDATIONS</span><h2>{strategyId === 'design-system' ? 'System in progress' : 'Design system'}</h2><p>{strategyId === 'design-system' ? 'Explore component directions in the preview; save a reusable system when it is ready.' : 'The active system shapes this project and can be reused elsewhere.'}</p></div>{tokens && <div className="system-controls"><label>Active system<Dropdown value={systemId} options={systems} ariaLabel="Active design system" onChange={id => void changeSystem(id)} /></label><label>System name<input value={tokens.name} onChange={event => editTokens(current => ({ ...current, name: event.target.value }))} /></label><div className="color-grid">{colorFields.map(([key, label]) => <label key={key} className="color-field"><span>{label}</span><input type="color" value={tokens.tokens.color[key]} onChange={event => editTokens(current => ({ ...current, tokens: { ...current.tokens, color: { ...current.tokens.color, [key]: event.target.value } } }))} /></label>)}</div><label>Display font<input value={tokens.tokens.font.display} onChange={event => editTokens(current => ({ ...current, tokens: { ...current.tokens, font: { ...current.tokens.font, display: event.target.value } } }))} /></label><label>Body font<input value={tokens.tokens.font.body} onChange={event => editTokens(current => ({ ...current, tokens: { ...current.tokens, font: { ...current.tokens.font, body: event.target.value } } }))} /></label><button className="button primary full" onClick={() => void saveTokens()} disabled={savingSystem}>{savingSystem ? 'Saving…' : 'Save & use system'}</button><small className="system-save-status" aria-live="polite">{savingSystem ? 'Saving changes…' : tokensDirty ? 'Changes pending…' : 'Changes save automatically'}</small><button className="button quiet full" onClick={importShadcnTheme}>Load shadcn globals.css</button><button className="button quiet full" onClick={() => void downloadSystem()}>Download shadcn theme bundle</button><div className="new-system"><input placeholder="New system name" value={systemName} onChange={event => setSystemName(event.target.value)} /><button className="button quiet" onClick={() => void createSystem()}>＋</button></div></div>}<div className="inspector-storage"><span>PROJECT STORAGE</span><strong>{formatSize((previewHtml.length || 0) + messages.reduce((sum, message) => sum + message.text.length, 0))}</strong><small>Saved automatically to Postgres</small></div></aside>
+      <nav className="filmstrip"><div className="filmstrip-title"><span>{strategyId === 'presentation' ? 'SLIDES' : 'ARTBOARD'}</span><span>{strategyId === 'presentation' ? `${String(slides.length).padStart(2, '0')} TOTAL` : 'LIVE PREVIEW'}</span></div><div className="filmstrip-items">{slides.map(slide => <button key={slide.id} className={`film-card ${selectedSlide === slide.index ? 'selected' : ''}`} onClick={() => void chooseSlide(slide)} aria-label={`Show slide ${slide.index}: ${slide.title}`}><SlideThumbnail key={`${projectId}:${slide.index}:${themeRevision}`} projectId={projectId} slide={slide} selected={selectedSlide === slide.index} themeRevision={themeRevision} /><small>{slide.title}</small></button>)}</div></nav>
     </main>
   </div>
 }
@@ -489,24 +554,18 @@ function ProjectThumbnail({ project }: { project: ProjectSummary }) {
   </div>
 }
 
-function SlideThumbnail({ projectId, slide, selected }: { projectId: string; slide: Slide; selected: boolean }) {
-  const root = useRef<HTMLSpanElement>(null)
-  const [visible, setVisible] = useState(false)
-  const [image, setImage] = useState('')
+function SlideThumbnail({ projectId, slide, selected, themeRevision }: { projectId: string; slide: Slide; selected: boolean; themeRevision: number }) {
+  const key = `${projectId}:${themeRevision}:${slide.index}`
+  const [image, setImage] = useState(() => slideThumbnailCache.get(key) ?? '')
   useEffect(() => {
-    const node = root.current
-    if (!node) return
-    const observer = new IntersectionObserver(entries => { if (entries.some(entry => entry.isIntersecting)) { setVisible(true); observer.disconnect() } }, { root: node.closest('.filmstrip-items'), rootMargin: '80px' })
-    observer.observe(node)
-    return () => observer.disconnect()
-  }, [])
-  useEffect(() => {
-    if (!visible || image) return
     let live = true
-    void trpc.project.slideThumbnail.query({ projectId, index: slide.index }).then(result => { if (live) setImage(result.image) }).catch(() => undefined)
+    const cached = slideThumbnailCache.get(key)
+    if (cached) { setImage(cached); return () => { live = false } }
+    setImage('')
+    void loadSlideThumbnail(projectId, slide.index, themeRevision).then(result => { if (live) setImage(result) }).catch(() => undefined)
     return () => { live = false }
-  }, [visible, image, projectId, slide.index])
-  return <span className={`film-thumbnail ${image ? 'loaded' : 'loading'} ${selected ? 'current' : ''}`} ref={root}>
+  }, [key, projectId, slide.index, themeRevision])
+  return <span className={`film-thumbnail ${image ? 'loaded' : 'loading'} ${selected ? 'current' : ''}`}>
     {image ? <img src={image} alt={`Slide ${slide.index}: ${slide.title}`} loading="lazy" /> : <span className="thumbnail-skeleton" aria-label={`Loading slide ${slide.index} thumbnail`} />}
     <span className="film-number">{String(slide.index).padStart(2, '0')}</span>
   </span>

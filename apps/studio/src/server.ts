@@ -10,7 +10,8 @@ import { fetchRequestHandler } from '@trpc/server/adapters/fetch'
 import { initTRPC } from '@trpc/server'
 import { z } from 'zod'
 import { config } from 'dotenv'
-import { createDesignSystem as createLegacyDesignSystem, exportDesignSystem, saveDesignSystem as saveLegacyDesignSystem, type DesignTokens } from './project.js'
+import { createDesignSystem as createLegacyDesignSystem, exportDesignSystem, saveDesignSystem as saveLegacyDesignSystem } from './project.js'
+import { liveThemeCss, normalizeDesignSystemDocument, synchronizeFoundationTokens, type DesignTokens } from './theme.js'
 import { activateProject, addMessage, clearProjectMessages, createProject, createSystem, getProject, getProjectMessages, getSystem, getSystems, initializeDatabase, listProjectFiles, listProjects, prisma, readProjectFile, saveSystem, setProjectSystem, storeThumbnail, withAgentDbTelemetry, writeProjectFile } from './db.js'
 import { getStrategy, projectStrategies } from './strategies.js'
 import { inspectPreviewHtml } from './preview-validation.js'
@@ -40,19 +41,28 @@ async function presentationHtml(projectId: string, slide?: number) {
     })
     return declarations.length ? `${selector}{${declarations.join(';')}}` : ''
   }).filter(Boolean).join('\n') : ''
-  const theme = `:root { --od-ink:${tokens.tokens.color.ink}; --od-canvas:${tokens.tokens.color.canvas}; --od-brand:${tokens.tokens.color.brand}; --od-accent:${tokens.tokens.color.accent}; --od-muted:${tokens.tokens.color.muted}; --od-font-display:${tokens.tokens.font.display}; --od-font-body:${tokens.tokens.font.body}; }${shadcnVars ? `\n${shadcnVars}` : ''}`
+  const theme = `${shadcnVars ? `${shadcnVars}\n` : ''}${liveThemeCss(tokens)}`
   const strategy = getStrategy(project.strategy)
   const hostStyles = strategy.previewMode === 'canvas'
     ? `<style id="opendesign-host-styles">html,body{width:100%;height:100%;overflow:auto}</style>`
     : `<style id="opendesign-host-styles">html,body{width:100%;height:100%;overflow:hidden}</style>`
   const selectors = '.slide,[data-od-slide]'
   const hostScript = strategy.previewMode === 'slides'
-    ? `<script id="opendesign-host-scaler">(()=>{const slides=[...document.querySelectorAll('${selectors}')];const fit=()=>{const s=document.querySelector('.stage');if(!s)return;const w=s.offsetWidth||1280,h=s.offsetHeight||720;s.style.scale=String(Math.min(innerWidth/w,innerHeight/h))};const selected=${slide ?? 0};if(selected>0&&slides.length){slides.forEach((s,i)=>{const on=i===selected-1;s.classList.toggle('active',on);s.setAttribute('aria-hidden',String(!on))});const counter=document.getElementById('counter');if(counter)counter.textContent=String(selected).padStart(2,'0')+' / '+String(slides.length);const progress=document.getElementById('progress');if(progress)progress.style.width=(selected/slides.length*100)+'%'}document.addEventListener('click',event=>{const el=event.target.closest('.slide h1,.slide h2,.slide h3,.slide p,.slide button,.slide a,.slide [data-od-id]');if(!el)return;const section=el.closest('${selectors}');const index=section?slides.indexOf(section)+1:${slide ?? 1};const label=(el.innerText||el.getAttribute('aria-label')||el.getAttribute('data-od-id')||el.tagName).replace(/\\s+/g,' ').trim().slice(0,140);parent.postMessage({type:'opendesign-target',slide:index,label,tag:el.tagName.toLowerCase()},'*')},true);addEventListener('resize',fit);addEventListener('load',fit);requestAnimationFrame(fit)})();</script>`
+    ? `<script id="opendesign-host-scaler">(()=>{
+      const slides=[...document.querySelectorAll('${selectors}')];
+      const fit=()=>{const s=document.querySelector('.stage');if(!s)return;const w=s.offsetWidth||1280,h=s.offsetHeight||720;s.style.scale=String(Math.min(innerWidth/w,innerHeight/h))};
+      const selectSlide=index=>{const selected=Number(index);if(!Number.isInteger(selected)||selected<1||selected>slides.length)return;slides.forEach((s,i)=>{const on=i===selected-1;s.classList.toggle('active',on);s.setAttribute('aria-hidden',String(!on))});const counter=document.getElementById('counter');if(counter)counter.textContent=String(selected).padStart(2,'0')+' / '+String(slides.length);const progress=document.getElementById('progress');if(progress)progress.style.width=(selected/slides.length*100)+'%'};
+      selectSlide(${slide ?? 0});
+      addEventListener('message',event=>{if(event.source!==parent||event.data?.type!=='opendesign-select-slide')return;selectSlide(event.data.index)});
+      document.addEventListener('click',event=>{const el=event.target.closest('.slide h1,.slide h2,.slide h3,.slide p,.slide button,.slide a,.slide [data-od-id]');if(!el)return;const section=el.closest('${selectors}');const index=section?slides.indexOf(section)+1:${slide ?? 1};const label=(el.innerText||el.getAttribute('aria-label')||el.getAttribute('data-od-id')||el.tagName).replace(/\\s+/g,' ').trim().slice(0,140);parent.postMessage({type:'opendesign-target',slide:index,label,tag:el.tagName.toLowerCase()},'*')},true);
+      addEventListener('resize',fit);addEventListener('load',fit);requestAnimationFrame(fit);
+    })();</script>`
     : `<script>document.addEventListener('click',event=>{const el=event.target.closest('h1,h2,h3,p,button,a,[data-od-id]');if(el)parent.postMessage({type:'opendesign-target',slide:1,label:(el.innerText||el.tagName).slice(0,140),tag:el.tagName.toLowerCase()},'*')},true)</script>`
   const hostNavigation = strategy.previewMode === 'slides' ? `<script id="opendesign-host-navigation">document.body.tabIndex=-1;window.focus();document.addEventListener('keydown',event=>{if(event.target instanceof Element&&event.target.closest('input,textarea,select,[contenteditable=true]'))return;const next=['ArrowRight','ArrowDown','PageDown',' '].includes(event.key);const previous=['ArrowLeft','ArrowUp','PageUp'].includes(event.key);if(!next&&!previous)return;event.preventDefault();parent.postMessage({type:'opendesign-navigation',delta:next?1:-1},'*')},true)</script>` : ''
+  const hostTheme = `<script id="opendesign-host-theme">addEventListener('message',event=>{if(event.source!==parent||event.data?.type!=='opendesign-theme')return;let style=document.getElementById('opendesign-live-theme');if(!style){style=document.createElement('style');style.id='opendesign-live-theme';document.head.append(style)}style.textContent=event.data.css})</script>`
   return html.includes('</head>')
-    ? html.replace('</head>', `<style>${theme}</style>${hostStyles}</head>`).replace('</body>', `${hostScript}${hostNavigation}</body>`)
-    : `<style>${theme}</style>${hostStyles}${html}${hostScript}${hostNavigation}`
+    ? html.replace('</head>', `<style>${theme}</style>${hostStyles}</head>`).replace('</body>', `${hostScript}${hostNavigation}${hostTheme}</body>`)
+    : `<style>${theme}</style>${hostStyles}${html}${hostScript}${hostNavigation}${hostTheme}`
 }
 
 async function thumbnailHtml(projectId: string) {
@@ -69,6 +79,30 @@ async function refreshDesignSystemPreviews(systemId: string) {
   for (const project of projects) {
     invalidateSlideThumbnails(project.id)
     refreshProjectThumbnail(project.id)
+  }
+}
+
+async function synchronizeProjectTokenDocuments(systemId: string, tokens: DesignTokens) {
+  const projects = await prisma.project.findMany({
+    where: { designSystemId: systemId },
+    include: { files: { where: { path: 'design-system.json' }, select: { content: true } } },
+  })
+  for (const project of projects) {
+    const file = project.files[0]
+    if (!file) continue
+    try {
+      const document = JSON.parse(file.content) as { name?: string; tokens?: Record<string, unknown> }
+      if (!document.tokens || typeof document.tokens !== 'object') continue
+      const stored = document.tokens
+      const target = stored.tokens && typeof stored.tokens === 'object' ? stored.tokens as Record<string, unknown> : stored
+      target.color = { ...(target.color as Record<string, unknown> | undefined), ...tokens.tokens.color }
+      target.font = { ...(target.font as Record<string, unknown> | undefined), ...tokens.tokens.font }
+      target.radius = { ...(target.radius as Record<string, unknown> | undefined), ...tokens.tokens.radius }
+      document.name = tokens.name
+      await writeProjectFile(project.id, 'design-system.json', JSON.stringify(document, null, 2))
+    } catch (error) {
+      console.warn(`Could not synchronize ${project.id}/design-system.json:`, error)
+    }
   }
 }
 
@@ -223,12 +257,14 @@ function authorTools(job: Job, projectId: string, strategyId: string) {
         refreshProjectThumbnail(projectId)
       }
       if (strategy.tokenFile === safePath) {
-        const data = JSON.parse(content) as { name?: string; tokens?: DesignTokens }
-        if (data.tokens?.tokens?.color && data.tokens.tokens.font && data.tokens.tokens.radius) {
-          const systemId = (await getProject(projectId)).designSystemId ?? 'acme'
-          const tokens = { ...data.tokens, name: data.name ?? data.tokens.name } as DesignTokens
-          await saveSystem(systemId, tokens)
-          await saveLegacyDesignSystem(systemId, tokens)
+        const systemId = (await getProject(projectId)).designSystemId ?? 'acme'
+        const current = await getSystem(systemId)
+        const tokens = normalizeDesignSystemDocument(JSON.parse(content), current.tokens)
+        if (tokens) {
+          const synchronized = synchronizeFoundationTokens(tokens)
+          await saveSystem(systemId, synchronized)
+          await saveLegacyDesignSystem(systemId, synchronized)
+          await synchronizeProjectTokenDocuments(systemId, synchronized)
           await refreshDesignSystemPreviews(systemId)
         }
       }
@@ -390,9 +426,10 @@ const router = t.router({
       return system
     }),
     saveDesignSystem: t.procedure.input(z.object({ projectId: z.string(), id: z.string(), tokens: tokenSchema })).mutation(async ({ input }) => {
-      const saved = await saveSystem(input.id, input.tokens as DesignTokens)
-      await saveLegacyDesignSystem(input.id, input.tokens as DesignTokens)
-      await setProjectSystem(input.projectId, input.id)
+      const tokens = synchronizeFoundationTokens(input.tokens as DesignTokens)
+      const saved = await saveSystem(input.id, tokens)
+      await saveLegacyDesignSystem(input.id, tokens)
+      await synchronizeProjectTokenDocuments(input.id, tokens)
       await refreshDesignSystemPreviews(input.id)
       return saved
     }),
