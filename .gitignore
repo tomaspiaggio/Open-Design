@@ -4,3 +4,5 @@ dist
 .env
 generated
 playwright-report
+apps/studio/screenshots/
+artifacts/ui/

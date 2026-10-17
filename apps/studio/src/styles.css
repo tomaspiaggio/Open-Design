@@ -206,3 +206,4 @@ body{background:var(--background);color:var(--foreground)}
 .run-card .activity-item{padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--background)}
 .event-tables{font-family:var(--font-mono)}
 .run-error{color:var(--destructive)!important}
+.system-save-status{margin-top:-7px;color:var(--muted-foreground);font-size:9px;text-align:center}

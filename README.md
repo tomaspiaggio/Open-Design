@@ -96,6 +96,10 @@ The strategy registry currently includes `presentation` and `design-system`. A s
 
 Each agent run is persisted in the `AgentRun` table, with an ordered event trail in `AgentRunEvent`. The model middleware records provider-reported input/output token counts; tool activity records the relevant PostgreSQL tables (for example `ProjectFile`, `Project`, and `DesignSystem`). The project editor's **Activity** tab shows recent runs, token totals, events, and table access. Token counts depend on the model provider reporting usage; unavailable provider counts may be recorded as zero.
 
+## UI screenshots
+
+Pull requests that touch the studio UI automatically capture the project gallery, presentation editor, design-system editor, and agent activity view with deterministic database fixtures. The screenshots are uploaded as a GitHub Actions artifact linked from the PR; no external image storage or model calls are used. See [.agents/skills/ui-screenshots/SKILL.md](.agents/skills/ui-screenshots/SKILL.md) for local capture instructions.
+
 ## Data and security notes
 
 - This is currently a local development app, not a multi-user hosted service. It has no authentication or authorization layer.

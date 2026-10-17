@@ -10,7 +10,9 @@
     "dev:web": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/workspace.test.ts",
+    "test": "tsx --test src/*.test.ts",
+    "screenshots:seed": "tsx scripts/seed-screenshot-fixtures.ts",
+    "screenshots": "tsx scripts/screenshots.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev"
   },

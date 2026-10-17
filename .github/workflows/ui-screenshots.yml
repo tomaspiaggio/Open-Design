@@ -1,0 +1,100 @@
+name: UI screenshots
+
+on:
+  pull_request:
+    paths:
+      - 'apps/studio/src/**'
+      - 'apps/studio/scripts/**'
+      - 'apps/studio/prisma/**'
+      - 'packages/acme-system/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/ui-screenshots.yml'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  screenshots:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: opendesign
+          POSTGRES_PASSWORD: opendesign
+          POSTGRES_DB: opendesign
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U opendesign -d opendesign"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://opendesign:opendesign@localhost:5432/opendesign?schema=public
+      OPENROUTER_API_KEY: screenshot-workflow-does-not-call-models
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @opendesign/studio db:generate
+      - run: pnpm --filter @opendesign/studio exec prisma migrate deploy
+      - run: pnpm --filter @opendesign/studio screenshots:seed | tee /tmp/screenshot-fixtures.log
+      - name: Read fixture project IDs
+        id: fixtures
+        run: |
+          ids="$(sed -n 's/^Created screenshot fixtures: presentation=\([^,]*\), design-system=\([^,]*\), run=.*/\1 \2/p' /tmp/screenshot-fixtures.log)"
+          echo "presentation_id=$(echo "$ids" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          echo "design_system_id=$(echo "$ids" | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
+      - name: Start OpenDesign
+        run: |
+          pnpm --filter @opendesign/studio dev > /tmp/opendesign.log 2>&1 &
+          echo $! > /tmp/opendesign.pid
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://localhost:5173/ >/dev/null && curl -fsS 'http://localhost:8787/trpc/project.list?input=%7B%22json%22%3A%7B%7D%7D' >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/opendesign.log
+          exit 1
+      - run: pnpm --filter @opendesign/studio exec playwright install --with-deps chromium
+      - name: Capture UI scenarios
+        env:
+          OPENDESIGN_SCREENSHOT_BASE_URL: http://localhost:5173
+          OPENDESIGN_SCREENSHOT_OUT: ../../artifacts/ui
+          OPENDESIGN_SCREENSHOT_PRESENTATION_ID: ${{ steps.fixtures.outputs.presentation_id }}
+          OPENDESIGN_SCREENSHOT_DESIGN_SYSTEM_ID: ${{ steps.fixtures.outputs.design_system_id }}
+        run: pnpm --filter @opendesign/studio screenshots
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opendesign-ui-screenshots
+          path: artifacts/ui/*.png
+          if-no-files-found: error
+          retention-days: 14
+      - name: Link screenshots from the pull request
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- opendesign-ui-screenshots -->';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `${marker}\n## OpenDesign UI screenshots\n\nCaptured from the pull request using deterministic local fixtures. [View or download the four screenshots from this run](${runUrl}#artifacts).\n\nNo model API calls or external image storage are used.`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find(comment => comment.user.type === 'Bot' && comment.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body });
+            }
